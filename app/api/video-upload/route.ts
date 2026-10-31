@@ -1,89 +1,109 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { v2 as cloudinary } from 'cloudinary';
-import { auth } from '@clerk/nextjs/server';
+
+import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
+import { v2 as cloudinary } from "cloudinary";
 import { prisma } from "@/lib/prisma";
 
-
-// Configuration
 cloudinary.config({
-    cloud_name: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET // Click 'View Credentials' below to copy your API secret
+  cloud_name: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-interface CloudinaryUploadResult {
-    public_id: string;
-    bytes: number;
-    duration?: number
-    [key: string]: any
-}
+const MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
+  try {
+    const { userId } = await auth();
 
-
-    try {
-
-        const {userId} = await auth()
-
-        if (!userId) {
-        return NextResponse.json({error: "Unauthorized"}, {status: 401})
-        }
-
-    if(
-        !process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ||
-        !process.env.CLOUDINARY_API_KEY ||
-        !process.env.CLOUDINARY_API_SECRET
-    ){
-        return NextResponse.json({error: "Cloudinary credentials not found"}, {status: 500})
+    if (!userId) {
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 }
+      );
     }
 
+    const body = await request.json();
 
-        const formData = await request.formData();
-        const file = formData.get("file") as File | null;
-        const title = formData.get("title") as string;
-        const description = formData.get("description") as string;
-        const originalSize = formData.get("originalSize") as string;
+    const {
+      title,
+      description,
+      publicId,
+      originalSize,
+    } = body;
 
-        if(!file){
-            return NextResponse.json({error: "File not found"}, {status: 400})
-        }
-
-        const bytes = await file.arrayBuffer()
-        const buffer = Buffer.from(bytes)
-
-        const result = await new Promise<CloudinaryUploadResult>(
-            (resolve, reject) => {
-                const uploadStream = cloudinary.uploader.upload_stream(
-                    {
-                        resource_type: "video",
-                        folder: "video-uploads",
-                        
-                    },
-                    (error, result) => {
-                        if(error) reject(error);
-                        else resolve(result as CloudinaryUploadResult);
-                    }
-                )
-                uploadStream.end(buffer)
-            }
-        )
-        const video = await prisma.video.create({
-            data: {
-                title,
-                description,
-                publicId: result.public_id,
-                originalSize: originalSize,
-                compressedSize: String(result.bytes),
-                duration: result.duration || 0,
-            }
-        })
-        return NextResponse.json(video)
-
-    } catch (error) {
-        console.log("UPload video failed", error)
-        return NextResponse.json({error: "UPload video failed"}, {status: 500})
-    } finally{
-        await prisma.$disconnect()
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      title.length > 200 ||
+      typeof description !== "string" ||
+      typeof publicId !== "string" ||
+      !publicId.trim() ||
+      typeof originalSize !== "number" ||
+      !Number.isSafeInteger(originalSize) ||
+      originalSize <= 0 ||
+      originalSize > MAX_FILE_SIZE
+    ) {
+      return NextResponse.json(
+        { error: "Invalid video information" },
+        { status: 400 }
+      );
     }
 
+    if (
+      !process.env.CLOUDINARY_API_SECRET ||
+      !process.env.CLOUDINARY_API_KEY ||
+      !process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME
+    ) {
+      return NextResponse.json(
+        { error: "Cloudinary configuration is missing" },
+        { status: 500 }
+      );
+    }
+
+    // Verify the actual uploaded video with Cloudinary.
+    const result = await cloudinary.api.resource(publicId, {
+      resource_type: "video",
+      context: true,
+    });
+
+    // Verify ownership.
+    if (result.context?.custom?.user_id !== userId) {
+      return NextResponse.json(
+        { error: "Video ownership verification failed" },
+        { status: 403 }
+      );
+    }
+
+    // Enforce actual uploaded file size.
+    if (result.bytes > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        { error: "Video exceeds the 100 MB limit" },
+        { status: 400 }
+      );
+    }
+
+    const video = await prisma.video.create({
+      data: {
+        title: title.trim(),
+        description: description.trim(),
+        publicId: result.public_id,
+        originalSize: String(originalSize),
+        compressedSize: String(result.bytes),
+        duration: result.duration || 0,
+      },
+    });
+
+    return NextResponse.json(video, {
+      status: 201,
+    });
+
+  } catch (error) {
+    console.error("Video metadata save failed:", error);
+
+    return NextResponse.json(
+      { error: "Could not save video information" },
+      { status: 500 }
+    );
+  }
 }
