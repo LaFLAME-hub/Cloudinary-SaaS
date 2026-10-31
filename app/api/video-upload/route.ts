@@ -65,7 +65,9 @@ export async function POST(request: NextRequest) {
     const result = await cloudinary.api.resource(publicId, {
       resource_type: "video",
       context: true,
+      media_metadata: true
     });
+    
 
     // Verify ownership.
     if (result.context?.custom?.user_id !== userId) {
@@ -90,7 +92,7 @@ export async function POST(request: NextRequest) {
         publicId: result.public_id,
         originalSize: String(originalSize),
         compressedSize: String(result.bytes),
-        duration: result.duration || 0,
+        duration: result.duration || result.video_duration|| 0,
       },
     });
 
